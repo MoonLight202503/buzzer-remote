@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>알림 부저 리모컨</title>
+<style>
+  :root {
+    --bg: #f2f4f1;
+    --fg: #1c2420;
+    --muted: #66726b;
+    --line: #cfd6d1;
+    --accent: #1f6f50;
+    --alert: #c8372d;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141a17;
+      --fg: #e7ece9;
+      --muted: #8d9a93;
+      --line: #2c3631;
+      --accent: #4fb88c;
+      --alert: #ef6a5e;
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: system-ui, -apple-system, "Segoe UI", "Noto Sans KR", "Malgun Gothic", sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 28px;
+    padding: 24px;
+  }
+  h1 { font-size: 1.25rem; font-weight: 600; margin: 0; }
+  #status { color: var(--muted); font-size: 0.95rem; min-height: 1.4em; text-align: center; }
+  #status.on { color: var(--accent); }
+  #status.err { color: var(--alert); }
+  button {
+    font: inherit;
+    color: inherit;
+    cursor: pointer;
+    border: 1.5px solid var(--line);
+    background: transparent;
+    border-radius: 999px;
+    padding: 12px 28px;
+  }
+  button:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  #ring {
+    width: 200px;
+    height: 200px;
+    border-radius: 50%;
+    border: none;
+    background: var(--alert);
+    color: #fff;
+    font-size: 1.5rem;
+    font-weight: 700;
+    padding: 0;
+  }
+  #ring:active:not(:disabled) { transform: scale(0.97); }
+  #ring.ringing { animation: pulse 0.5s steps(2, jump-none) infinite; }
+  @keyframes pulse { 50% { box-shadow: 0 0 0 14px color-mix(in srgb, var(--alert) 30%, transparent); } }
+  @media (prefers-reduced-motion: reduce) { #ring.ringing { animation: none; } }
+  .row { display: flex; gap: 12px; }
+  #unsupported { color: var(--alert); text-align: center; max-width: 32ch; display: none; }
+</style>
+</head>
+<body>
+  <h1>알림 부저 리모컨</h1>
+  <p id="unsupported">이 브라우저는 Web Bluetooth를 지원하지 않습니다. PC나 안드로이드의 Chrome을 사용하세요.</p>
+  <div id="status" role="status">연결 안 됨</div>
+  <button id="ring" disabled>울리기</button>
+  <div class="row">
+    <button id="connect">연결</button>
+    <button id="stop" disabled>끄기</button>
+    <button id="disconnect" disabled>연결 해제</button>
+  </div>
+
+<script>
+const SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+const CHAR_UUID    = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
+
+const $ = (id) => document.getElementById(id);
+const statusEl = $("status"), ringBtn = $("ring"), stopBtn = $("stop");
+const connectBtn = $("connect"), disconnectBtn = $("disconnect");
+
+let device = null, characteristic = null, ringTimer = null;
+
+function setStatus(text, cls = "") {
+  statusEl.textContent = text;
+  statusEl.className = cls;
+}
+
+function setConnected(on) {
+  ringBtn.disabled = !on;
+  stopBtn.disabled = !on;
+  disconnectBtn.disabled = !on;
+  connectBtn.disabled = on;
+  if (!on) ringBtn.classList.remove("ringing");
+}
+
+async function send(value) {
+  if (!characteristic) return;
+  const data = new Uint8Array([value]);
+  try {
+    if (characteristic.writeValueWithoutResponse) await characteristic.writeValueWithoutResponse(data);
+    else await characteristic.writeValue(data);
+  } catch (e) {
+    setStatus("전송 실패: " + e.message, "err");
+  }
+}
+
+function onDisconnected() {
+  characteristic = null;
+  clearTimeout(ringTimer);
+  setConnected(false);
+  setStatus("연결 끊김. 다시 연결하세요.", "err");
+}
+
+async function connect() {
+  try {
+    setStatus("기기 검색 중...");
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ services: [SERVICE_UUID] }]
+    });
+    device.addEventListener("gattserverdisconnected", onDisconnected);
+    setStatus("연결 중...");
+    const server = await device.gatt.connect();
+    const service = await server.getPrimaryService(SERVICE_UUID);
+    characteristic = await service.getCharacteristic(CHAR_UUID);
+    setConnected(true);
+    setStatus((device.name || "AlertBuzzer") + " 연결됨", "on");
+  } catch (e) {
+    setConnected(false);
+    setStatus(e.name === "NotFoundError" ? "선택 취소됨" : "연결 실패: " + e.message, "err");
+  }
+}
+
+async function ring() {
+  await send(1);
+  ringBtn.classList.add("ringing");
+  setStatus("울리는 중 (최대 10초)", "on");
+  clearTimeout(ringTimer);
+  ringTimer = setTimeout(() => {
+    ringBtn.classList.remove("ringing");
+    if (characteristic) setStatus("연결됨", "on");
+  }, 10000);
+}
+
+async function stop() {
+  await send(0);
+  clearTimeout(ringTimer);
+  ringBtn.classList.remove("ringing");
+  setStatus("멈춤", "on");
+}
+
+function disconnect() {
+  if (device && device.gatt.connected) device.gatt.disconnect();
+}
+
+if (!("bluetooth" in navigator)) {
+  $("unsupported").style.display = "block";
+  connectBtn.disabled = true;
+}
+
+connectBtn.addEventListener("click", connect);
+ringBtn.addEventListener("click", ring);
+stopBtn.addEventListener("click", stop);
+disconnectBtn.addEventListener("click", disconnect);
+</script>
+</body>
+</html>
